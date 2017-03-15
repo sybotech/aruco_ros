@@ -36,6 +36,7 @@ or implied, of Rafael Muñoz Salinas.
 #include <iostream>
 #include <aruco/aruco.h>
 #include <aruco/cvdrawingutils.h>
+#include <aruco_msgs/MarkerArray.h>
 
 #include <opencv2/core/core.hpp>
 #include <ros/ros.h>
@@ -58,22 +59,18 @@ private:
   bool useRectifiedImages;
   MarkerDetector mDetector;
   vector<Marker> markers;
-  //ros::Subscriber cam_info_sub;
-  bool cam_info_received;
   image_transport::Publisher image_pub;
   image_transport::Publisher debug_pub;
   ros::Publisher pose_pub;
   ros::Publisher transform_pub; 
   ros::Publisher position_pub;
-  ros::Publisher marker_pub; //rviz visualization marker
+  ros::Publisher viz_pub; //rviz visualization marker
   ros::Publisher pixel_pub;
-  //std::string marker_frame;
-  //std::string camera_frame;
+  ros::Publisher markers_pub;
   std::string reference_frame;
   tf::TransformBroadcaster br;
 
   double marker_size;
-  int marker_id;
 
   ros::NodeHandle nh;
   image_transport::ImageTransport it;
@@ -84,8 +81,7 @@ private:
 
 public:
   ArucoSimple()
-    : cam_info_received(false),
-      nh("~"),
+    : nh("~"),
       it(nh)
   {
 
@@ -110,33 +106,23 @@ public:
     mDetector.getMinMaxSize(mins, maxs);
     ROS_INFO_STREAM("Marker size min: " << mins << "  max: " << maxs);
     ROS_INFO_STREAM("Desired speed: " << mDetector.getDesiredSpeed());
-    
 
-    camera_sub = it.subscribeCamera("camera", 2, &ArucoSimple::camera_callback, this);
-    //image_sub = it.subscribe("/image", 1, &ArucoSimple::image_callback, this);
-    //cam_info_sub = nh.subscribe("/camera_info", 1, &ArucoSimple::cam_info_callback, this);
+    nh.param<double>("marker_size", marker_size, 0.05);
+    nh.param<std::string>("reference_frame", reference_frame, "");
+    nh.param<bool>("image_is_rectified", useRectifiedImages, true);
 
     image_pub = it.advertise("result", 1);
     debug_pub = it.advertise("debug", 1);
     pose_pub = nh.advertise<geometry_msgs::PoseStamped>("pose", 100);
     transform_pub = nh.advertise<geometry_msgs::TransformStamped>("transform", 100);
     position_pub = nh.advertise<geometry_msgs::Vector3Stamped>("position", 100);
-    marker_pub = nh.advertise<visualization_msgs::Marker>("marker", 10);
+    markers_pub = nh.advertise<aruco_msgs::MarkerArray>("aruco_markers", 100);
+    viz_pub = nh.advertise<visualization_msgs::Marker>("marker", 10);
     pixel_pub = nh.advertise<geometry_msgs::PointStamped>("pixel", 10);
 
-    nh.param<double>("marker_size", marker_size, 0.05);
-    nh.param<int>("marker_id", marker_id, 300);
-    nh.param<std::string>("reference_frame", reference_frame, "");
-    //nh.param<std::string>("camera_frame", camera_frame, "");
-    //nh.param<std::string>("marker_frame", marker_frame, "");
-    nh.param<bool>("image_is_rectified", useRectifiedImages, true);
+    camera_sub = it.subscribeCamera("camera", 2, &ArucoSimple::camera_callback, this);
 
-    //ROS_ASSERT(camera_frame != "" && marker_frame != "");
-
-    //if ( reference_frame.empty() )
-    //  reference_frame = camera_frame;
-
-    ROS_INFO("Aruco node started with marker size of %f m and marker id to track: %d", marker_size, marker_id);
+    ROS_INFO("Aruco node started with marker size of %f m", marker_size);
     //ROS_INFO("Aruco node will publish pose to TF with %s as parent and %s as child.", reference_frame.c_str(), marker_frame.c_str());
   }
 
@@ -175,30 +161,23 @@ public:
     return true;
   }
 
-  void camera_callback(const sensor_msgs::ImageConstPtr& msg, const sensor_msgs::CameraInfoConstPtr& info_msg)
-  {
-    cam_info_callback(*info_msg);
-    image_callback(msg);
-  }
-
-  void publish_marker(const Marker & marker, std::string camera_frame)
+  // Publish a single marker
+  void publish_marker(const Marker & marker, tf::StampedTransform cameraToReference)
   {
     ros::Time curr_stamp(ros::Time::now());
     tf::Transform transform = aruco_ros::arucoMarker2Tf(marker);
+
+    /*
     tf::StampedTransform cameraToReference;
     cameraToReference.setIdentity();
 
     if ( reference_frame != camera_frame )
     {
-      getTransform(reference_frame,
-                   camera_frame,
-                   cameraToReference);
-    }
+      getTransform(reference_frame, camera_frame, cameraToReference);
+    }*/
 
-    transform =
-      static_cast<tf::Transform>(cameraToReference)
-      * static_cast<tf::Transform>(rightToLeft)
-      * transform;
+    transform = static_cast<tf::Transform>(cameraToReference)
+      * static_cast<tf::Transform>(rightToLeft) * transform;
 
     char marker_name[255];
     sprintf(marker_name, "aruco_marker_%d", marker.id);
@@ -243,74 +222,107 @@ public:
     visMarker.color.b = 0;
     visMarker.color.a = 1.0;
     visMarker.lifetime = ros::Duration(3.0);
-    marker_pub.publish(visMarker);
+    viz_pub.publish(visMarker);
   }
 
-  void image_callback(const sensor_msgs::ImageConstPtr& msg)
+  void publishMarkers(const tf::StampedTransform & cameraToReference)
   {
+    // marker array publish
+    aruco_msgs::MarkerArray msg;
+    msg.markers.resize(markers.size());
+    msg.header.stamp = cameraToReference.stamp_;
+    msg.header.frame_id = cameraToReference.frame_id_;
+    msg.header.seq++;
+
+    for(size_t i=0; i<markers.size(); ++i)
+    {
+      aruco_msgs::Marker & marker_i = msg.markers[i];
+      marker_i.header.stamp = cameraToReference.stamp_;
+      marker_i.id = markers[i].id;
+      marker_i.confidence = 1.0;
+      tf::Transform transform = aruco_ros::arucoMarker2Tf(markers[i]);
+      transform = static_cast<tf::Transform>(cameraToReference) * transform;
+      tf::poseTFToMsg(transform, marker_i.pose.pose);
+      marker_i.header.frame_id = reference_frame;
+    }
+
+    //publish marker array
+    if (msg.markers.size() > 0)
+      markers_pub.publish(msg);
+  }
+
+  void camera_callback(const sensor_msgs::ImageConstPtr& msg, const sensor_msgs::CameraInfoConstPtr& info_msg)
+  {
+    cam_info_callback(*info_msg);
+
     if(reference_frame.empty())
       reference_frame = msg->header.frame_id;
-    if(cam_info_received)
+
+    tf::StampedTransform cameraToReference;
+    cameraToReference.setIdentity();
+    // Calculating transfrom from reference frame to camera frame
+    if ( reference_frame != msg->header.frame_id )
     {
-      ros::Time curr_stamp(ros::Time::now());
-      cv_bridge::CvImagePtr cv_ptr;
-      try
+      getTransform(reference_frame, msg->header.frame_id, cameraToReference);
+    }
+    cameraToReference.stamp_ = msg->header.stamp;
+
+    ros::Time curr_stamp(ros::Time::now());
+    cv_bridge::CvImagePtr cv_ptr;
+    try
+    {
+      cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::RGB8);
+      inImage = cv_ptr->image;
+
+      std::string camera_frame = msg->header.frame_id;
+
+      //detection results will go into "markers"
+      markers.clear();
+      //Ok, let's detect
+      mDetector.detect(inImage, markers, camParam, marker_size, false);
+      //for each marker, draw info and its boundaries in the image
+      for(size_t i=0; i<markers.size(); ++i)
       {
-        cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::RGB8);
-        inImage = cv_ptr->image;
+        publish_marker(markers[i], cameraToReference);
+        // but drawing all the detected markers
+        markers[i].draw(inImage,cv::Scalar(0,0,255),2);
+      }
 
-        std::string camera_frame = msg->header.frame_id;
+      this->publishMarkers(cameraToReference);
 
-        //detection results will go into "markers"
-        markers.clear();
-        //Ok, let's detect
-        mDetector.detect(inImage, markers, camParam, marker_size, false);
-        //for each marker, draw info and its boundaries in the image
+      //draw a 3d cube in each marker if there is 3d info
+      if(camParam.isValid() && marker_size!=-1)
+      {
         for(size_t i=0; i<markers.size(); ++i)
         {
-          // only publishing the selected marker
-          //if(markers[i].id == marker_id)
-          {
-            publish_marker(markers[i], camera_frame);
-          }
-          // but drawing all the detected markers
-          markers[i].draw(inImage,cv::Scalar(0,0,255),2);
-        }
-
-        //draw a 3d cube in each marker if there is 3d info
-        if(camParam.isValid() && marker_size!=-1)
-        {
-          for(size_t i=0; i<markers.size(); ++i)
-          {
-            CvDrawingUtils::draw3dAxis(inImage, markers[i], camParam);
-          }
-        }
-
-        if(image_pub.getNumSubscribers() > 0)
-        {
-          //show input with augmented information
-          cv_bridge::CvImage out_msg;
-          out_msg.header = msg->header;
-          out_msg.encoding = sensor_msgs::image_encodings::RGB8;
-          out_msg.image = inImage;
-          image_pub.publish(out_msg.toImageMsg());
-        }
-
-        if(debug_pub.getNumSubscribers() > 0)
-        {
-          //show also the internal image resulting from the threshold operation
-          cv_bridge::CvImage debug_msg;
-          debug_msg.header = msg->header;
-          debug_msg.encoding = sensor_msgs::image_encodings::MONO8;
-          debug_msg.image = mDetector.getThresholdedImage();
-          debug_pub.publish(debug_msg.toImageMsg());
+          CvDrawingUtils::draw3dAxis(inImage, markers[i], camParam);
         }
       }
-      catch (cv_bridge::Exception& e)
+
+      if(image_pub.getNumSubscribers() > 0)
       {
-        ROS_ERROR("cv_bridge exception: %s", e.what());
-        return;
+        //show input with augmented information
+        cv_bridge::CvImage out_msg;
+        out_msg.header = msg->header;
+        out_msg.encoding = sensor_msgs::image_encodings::RGB8;
+        out_msg.image = inImage;
+        image_pub.publish(out_msg.toImageMsg());
       }
+
+      if(debug_pub.getNumSubscribers() > 0)
+      {
+        //show also the internal image resulting from the threshold operation
+        cv_bridge::CvImage debug_msg;
+        debug_msg.header = msg->header;
+        debug_msg.encoding = sensor_msgs::image_encodings::MONO8;
+        debug_msg.image = mDetector.getThresholdedImage();
+        debug_pub.publish(debug_msg.toImageMsg());
+      }
+    }
+    catch (cv_bridge::Exception& e)
+    {
+      ROS_ERROR("cv_bridge exception: %s", e.what());
+      return;
     }
   }
 
@@ -322,14 +334,9 @@ public:
     // handle cartesian offset between stereo pairs
     // see the sensor_msgs/CamaraInfo documentation for details
     rightToLeft.setIdentity();
-    rightToLeft.setOrigin(
-        tf::Vector3(
-            -msg.P[3]/msg.P[0],
-            -msg.P[7]/msg.P[5],
-            0.0));
-
-    cam_info_received = true;
-    //cam_info_sub.shutdown();
+    double ox = -msg.P[3]/msg.P[0];
+    double oy = -msg.P[7]/msg.P[5];
+    rightToLeft.setOrigin( tf::Vector3( ox, oy, 0.0));
   }
 };
 
