@@ -265,7 +265,9 @@ public:
     {
       getTransform(reference_frame, msg->header.frame_id, cameraToReference);
     }
+
     cameraToReference.stamp_ = msg->header.stamp;
+    cameraToReference.frame_id_ = reference_frame;
 
     ros::Time curr_stamp(ros::Time::now());
     cv_bridge::CvImagePtr cv_ptr;
