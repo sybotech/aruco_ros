@@ -61,32 +61,26 @@ private:
   vector<Marker> markers;
   image_transport::Publisher image_pub;
   image_transport::Publisher debug_pub;
-  ros::Publisher pose_pub;
-  ros::Publisher transform_pub; 
-  ros::Publisher position_pub;
   ros::Publisher viz_pub; //rviz visualization marker
-  ros::Publisher pixel_pub;
   ros::Publisher markers_pub;
   std::string reference_frame;
   tf::TransformBroadcaster br;
 
+  /// Expected marker size
   double marker_size;
 
-  ros::NodeHandle nh;
   image_transport::ImageTransport it;
   image_transport::CameraSubscriber camera_sub;
-  //image_transport::Subscriber image_sub;
 
   tf::TransformListener _tfListener;
 
 public:
-  ArucoSimple()
-    : nh("~"),
-      it(nh)
+  ArucoSimple(ros::NodeHandle & nh, ros::NodeHandle & private_nh)
+    : it(nh)
   {
 
     std::string refinementMethod;
-    nh.param<std::string>("corner_refinement", refinementMethod, "LINES");
+    private_nh.param<std::string>("corner_refinement", refinementMethod, "LINES");
     if ( refinementMethod == "SUBPIX" )
       mDetector.setCornerRefinementMethod(aruco::MarkerDetector::SUBPIX);
     else if ( refinementMethod == "HARRIS" )
@@ -107,18 +101,18 @@ public:
     ROS_INFO_STREAM("Marker size min: " << mins << "  max: " << maxs);
     ROS_INFO_STREAM("Desired speed: " << mDetector.getDesiredSpeed());
 
-    nh.param<double>("marker_size", marker_size, 0.05);
-    nh.param<std::string>("reference_frame", reference_frame, "");
-    nh.param<bool>("image_is_rectified", useRectifiedImages, true);
+    private_nh.param<double>("marker_size", marker_size, 0.05);
+    private_nh.param<std::string>("reference_frame", reference_frame, "");
+    private_nh.param<bool>("image_is_rectified", useRectifiedImages, true);
 
     image_pub = it.advertise("result", 1);
     debug_pub = it.advertise("debug", 1);
-    pose_pub = nh.advertise<geometry_msgs::PoseStamped>("pose", 100);
-    transform_pub = nh.advertise<geometry_msgs::TransformStamped>("transform", 100);
-    position_pub = nh.advertise<geometry_msgs::Vector3Stamped>("position", 100);
+    //pose_pub = nh.advertise<geometry_msgs::PoseStamped>("pose", 100);
+    //transform_pub = nh.advertise<geometry_msgs::TransformStamped>("transform", 100);
+    //position_pub = nh.advertise<geometry_msgs::Vector3Stamped>("position", 100);
     markers_pub = nh.advertise<aruco_msgs::MarkerArray>("aruco_markers", 100);
-    viz_pub = nh.advertise<visualization_msgs::Marker>("marker", 10);
-    pixel_pub = nh.advertise<geometry_msgs::PointStamped>("pixel", 10);
+    viz_pub = nh.advertise<visualization_msgs::Marker>("visualization_markers", 10);
+    //pixel_pub = nh.advertise<geometry_msgs::PointStamped>("pixel", 10);
 
     camera_sub = it.subscribeCamera("camera", 2, &ArucoSimple::camera_callback, this);
 
@@ -188,6 +182,7 @@ public:
     tf::poseTFToMsg(transform, poseMsg.pose);
     poseMsg.header.frame_id = reference_frame;
     poseMsg.header.stamp = curr_stamp;
+    /*
     pose_pub.publish(poseMsg);
 
     geometry_msgs::TransformStamped transformMsg;
@@ -204,11 +199,11 @@ public:
     pixelMsg.point.x = marker.getCenter().x;
     pixelMsg.point.y = marker.getCenter().y;
     pixelMsg.point.z = 0;
-    pixel_pub.publish(pixelMsg);
+    pixel_pub.publish(pixelMsg);*/
 
     //Publish rviz marker representing the ArUco marker patch
     visualization_msgs::Marker visMarker;
-    visMarker.header = transformMsg.header;
+    visMarker.header = poseMsg.header;
     visMarker.pose = poseMsg.pose;
     visMarker.id = marker.id;
     visMarker.type   = visualization_msgs::Marker::CUBE;
@@ -347,7 +342,9 @@ int main(int argc,char **argv)
 {
   ros::init(argc, argv, "aruco_simple");
 
-  ArucoSimple node;
+  ros::NodeHandle nh;
+  ros::NodeHandle private_nh("~");
+  ArucoSimple node(nh, private_nh);
 
   ros::spin();
 }
